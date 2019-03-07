@@ -22,11 +22,11 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
-#include "ExampleAgent.h"
-
-#include <opencog/server/CogServer.h>
-#include <opencog/server/Factory.h>
+#include <opencog/cogserver/server/CogServer.h>
+#include <opencog/cogserver/server/Factory.h>
 #include <opencog/util/Logger.h>
+
+#include "ExampleAgent.h"
 
 using namespace opencog;
 
@@ -41,7 +41,7 @@ ExampleModule::ExampleModule(CogServer& cs) : Module(cs)
 ExampleModule::~ExampleModule()
 {
     logger().info("[ExampleModule] destructor");
-    _cogserver.destroyAllAgents(ExampleAgent::info().id);
+    _cogserver.stopAllAgents(ExampleAgent::info().id);
 }
 
 void ExampleModule::init()

@@ -1,8 +1,9 @@
 __author__ = 'Cosmo Harrigan'
 
+import socket
 import opencog.cogserver
 from web.api.apimain import RESTAPI
-from multiprocessing import Process
+from threading import Thread
 
 # Endpoint configuration
 # To allow public access, set to 0.0.0.0; for local access, set to 127.0.0.1
@@ -15,19 +16,7 @@ class Start(opencog.cogserver.Request):
     Implements a CogServer Module to load upon startup that will load the REST
     API defined in apimain.py
 
-    Prerequisites:
-        1) Requires installation of the Python dependencies by running:
-            sudo ./install_dependencies.sh
-
-        2) Requires the configuration file (opencog.conf) to contain the
-           following parameters:
-            - PYTHON_EXTENSION_DIRS must specify the relative location of the
-              API scripts
-                Example: PYTHON_EXTENSION_DIRS = ../opencog/python/web/api
-            - PYTHON_PRELOAD must specify the restapi module
-                Example: PYTHON_PRELOAD = restapi
-
-    To start the REST API, type restapi.Start at the CogServer shell
+    See examples @ github.com/opencog/opencog/tree/master/examples/restapi
     """
 
     summary = "Start the OpenCog REST API"
@@ -40,28 +29,28 @@ class Start(opencog.cogserver.Request):
                   "http://127.0.0.1:5000/api/v1.1/atoms?type=ConceptNode"
 
     def __init__(self):
-        self.process = Process(target=self.invoke)
         self.atomspace = None  # Will be passed as argument in run method
 
     def run(self, args, atomspace):
-        """
-        Loads the REST API into a separate process and invokes it, so that it
-        will continue serving requests in the background after the Request
-        that loads it has returned control to the CogServer
-        """
         self.atomspace = atomspace
-
         '''
-        By using multiprocessing and setting the daemon attribute of the
-        process serving background REST API requests to True, when the
-        parent process exits, it will attempt to terminate the daemonic
-        child process (https://docs.python.org/2/library/multiprocessing.html#multiprocessing.Process.daemon)
+        make a daemon thread so that it can be interrupted
         '''
-        self.process.daemon = True
-        self.process.start()
-
-        print "REST API is now running in a separate process."
+        thread = Thread(target=self.invoke)
+        thread.setDaemon(True)
+        thread.start()
+        print ("REST API is now running in a separate daemon thread.")
 
     def invoke(self):
         self.api = RESTAPI(self.atomspace)
-        self.api.run(host=IP_ADDRESS, port=PORT)
+
+        # OK, so if the remote end closes the pipe, we get a SIGPIPE
+        # error, and the server dies.  So just restart the server in
+        # that situation. See bug opencog/ros-behavior-scripting/issues/108
+        try_again = True
+        while try_again:
+            try_again = False
+            try:
+                self.api.run(host=IP_ADDRESS, port=PORT)
+            except socket.error as e:
+                try_again = True

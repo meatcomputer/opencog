@@ -1,4 +1,4 @@
-requests==2.2
+requests>=2.20.0
 argparse
 matplotlib
 nose
@@ -6,11 +6,10 @@ numpy
 pyparsing
 python-dateutil
 scipy
-tornado
-wsgiref
 Flask
 flask-restful
 flask-restful-swagger
+flask-cors
 mock
 six
 graphviz

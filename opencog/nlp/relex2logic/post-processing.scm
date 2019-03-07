@@ -3,8 +3,14 @@
 ;
 ; Assorted functions for post-processing relex2logic output.
 ;
-; Copyright (c) 2014 William Ma <https://github.com/williampma>
-;
+
+(use-modules (ice-9 receive) (srfi srfi-1))
+
+(use-modules (opencog))
+(use-modules (opencog exec))
+
+(load "r2l-utilities.scm")
+(load "tv-utilities.scm")
 
 ; =======================================================================
 ; Helper utilities for post-processing.
@@ -13,8 +19,14 @@
 ; -----------------------------------------------------------------------
 ; word-get-r2l-node -- Retrieve corresponding R2L created node
 ;
-; Given a WordInstanceNode created by RelEx, retrieve the corresponding
-; ConceptNode or PredicateNode or NumberNode created by R2L helper
+; Given a WordInstanceNode/WordNode created by RelEx, retrieve the
+; corresponding ConceptNode or PredicateNode or NumberNode or
+; DefinedLinguisticPredicateNode created by R2L helper.
+;
+; XXX FIXME this method is really bad because for each new type of
+; node that R2L uses, it needs to be added here.  There needs some
+; different way for linking R2L nodes to WordInstanceNodes other
+; than node name! e.g. maybe an R2LLink ?
 ;
 (define (word-get-r2l-node node)
 	(define name
@@ -27,35 +39,25 @@
 		((not (null? (cog-node 'ConceptNode name))) (cog-node 'ConceptNode name))
 		((not (null? (cog-node 'PredicateNode name))) (cog-node 'PredicateNode name))
 		((not (null? (cog-node 'NumberNode name))) (cog-node 'NumberNode name))
+		((not (null? (cog-node 'DefinedLinguisticPredicateNode name))) (cog-node 'DefinedLinguisticPredicateNode name))
 		(else '())
 	)
 )
 
 ; -----------------------------------------------------------------------
-; check-exception -- Check if 'link' should be excluded from markers post-processing
+; r2l-is-unary? -- Check if 'link' is only about one word instance
 ;
-; Given a link, check to see if it should be ignored.  This could be a ReferenceLink
-; or a link with any sub-node does not have the corresponding WordInstanceNode
-; from RelEx (with some exceptions)
+; Given a link, check if it only contains one instanced node.  Used to
+; ignore links that do not need to be post-processed.
 ;
-(define (check-exception link)
-	(define words (cog-get-all-nodes link))
-	; check if a node has no corresponding 'WordInstanceNode
-	(define (check-word w)
-		(and
-			; exception that should not be considered as non-instance
-			; TODO better node name for automatic checking possible
-			(not (equal? 'VariableNode (cog-type w)))
-			(not (equal? 'ReferenceNode (cog-type w)))
-			(not (string=? "possession" (cog-name w)))
-			(not (string=? "after" (cog-name w)))
-			(not (string=? "before" (cog-name w)))
-			(not (string=? "that" (cog-name w)))
-			; the actual check
-			(null? (cog-node 'WordInstanceNode (cog-name w)))
-		)
-	)
-	(or (equal? 'ReferenceLink (cog-type link)) (find check-word words))
+; XXX FIXME except that we can have (EvaluationLink "not" "run@1234") which
+;     appears unary but should be post-processed.  A more long term
+;     solution is needed.
+;
+(define (r2l-is-unary? link)
+	(define nodes (cog-get-all-nodes link))
+
+	(<= (count is-r2l-inst? nodes) 1)
 )
 
 ; -----------------------------------------------------------------------
@@ -75,7 +77,7 @@
 			)
 		)
 	)
-	
+
 	(recursive-helper (car sets) (cdr sets))
 )
 
@@ -109,9 +111,9 @@
 ; Check if a word-inst ConceptNode has definite-rule applied.
 ;
 (define (definite? word-concept-inst)
-	(define definite (cog-node 'PredicateNode "definite"))
+	(define definite (DefinedLinguisticPredicateNode "definite"))
 	(define llink (cog-link 'ListLink word-concept-inst))
-	(and (not (null? definite))
+	(and
 		(not (null? llink))
 		(not (null? (cog-link 'EvaluationLink definite llink))))
 )
@@ -121,7 +123,7 @@
 ;
 ; Returns a random hex string of length 'str-length'.
 ;
-(define (random-hex-string str-length) 
+(define (random-hex-string str-length)
 	(define alphanumeric "abcdef0123456789")
 	(define str "")
 	(while (> str-length 0)
@@ -135,6 +137,8 @@
 ; random-UUID -- Generate a new UUID version 4
 ;
 ; Returns UUID version 4 (ie, mostly just random hex with some fixed values)
+; XXX FIXME should be changed to just use sha-256 -- that would make it
+; faster, better.
 ;
 (define (random-UUID)
 	(define part1 (random-hex-string 8))
@@ -149,13 +153,13 @@
 ; -----------------------------------------------------------------------
 ; create-unique-word-name -- Generate a new unique name for a word
 ;
-; Given a non-instanced word's ConceptNode, generate a new instance,
+; Given an instanced word's ConceptNode, generate a new instance,
 ; appending @ UUID.
 ;
 (define (create-unique-word-name word)
 	(define (create-new-name w)
 		(define tail-name (random-UUID))
-		(string-append (cog-name w) "@" tail-name)
+		(string-append (cog-name (word-inst-get-word (r2l-get-word-inst w))) "@" tail-name)
 	)
 	(define new-name (create-new-name word))
 
@@ -207,7 +211,7 @@
 ; Given an allmarker of the form as 'orig-link':
 ;
 ;	EvaluationLink
-;		PredicateNode "allmarker"
+;		DefinedLinguisticPredicateNode "allmarker"
 ;		ListLink
 ;			ConceptNode noun_instance
 ;
@@ -228,8 +232,8 @@
 	(define listlink (car (cog-filter 'ListLink (cog-outgoing-set orig-link))))
 	(define word (gar listlink))
 	(define root-links (cog-get-root word))
-	; get rid of links with non-instanced word
-	(define clean-links (remove check-exception root-links))
+	; get rid of links with only one instanced word
+	(define clean-links (remove r2l-is-unary? root-links))
 	; helper recursive function to rebuild a link, replacing 'word' node with $X
 	(define (rebuild-with-x link)
 		(define old-oset (cog-outgoing-set link))
@@ -237,7 +241,7 @@
 			(if (cog-link? atom)
 				(rebuild-with-x atom)
 				(if (equal? atom word)
-					(VariableNode "$X" df-node-stv)
+					(VariableNode "$X")
 					atom
 				)
 			)
@@ -251,17 +255,17 @@
 	(define final-links (map rebuild-with-x clean-links))
 	(define results-list
 		(list
-			(ForAllLink df-link-stv
-				(VariableNode "$X" df-node-stv)
-				(ImplicationLink df-link-stv
-					(InheritanceLink df-link-stv
-						(VariableNode "$X" df-node-stv)
+			(ForAllLink
+				(VariableNode "$X")
+				(ImplicationLink
+					(InheritanceLink
+						(VariableNode "$X")
 						word
 					)
 					; new rebuilt links
 					(if (= (length final-links) 1)
 						final-links
-						(AndLink df-link-stv final-links)
+						(AndLink final-links)
 					)
 				)
 			)
@@ -269,7 +273,7 @@
 	)
 
 	; delete old rebuilt links
-	(for-each purge-hypergraph clean-links)
+	(for-each extract-hypergraph clean-links)
 
 	results-list
 )
@@ -283,7 +287,7 @@
 ; Given an maybemarker of the form as 'orig-link':
 ;
 ;	EvaluationLink
-;		PredicateNode "maybemarker"
+;		DefinedLinguisticPredicateNode "maybemarker"
 ;		ListLink
 ;			ConceptNode word_instance
 ;
@@ -294,8 +298,8 @@
 	(define listlink (car (cog-filter 'ListLink (cog-outgoing-set orig-link))))
 	(define word (gar listlink))
 	(define root-links (cog-get-root word))
-	; get rid of links with non-instanced word
-	(define clean-links (remove check-exception root-links))
+	; get rid of links with only one instanced word
+	(define clean-links (remove r2l-is-unary? root-links))
 	(define (change-tv l)
 		(cog-set-tv! l (cog-new-stv 0.99 0.5))
 	)
@@ -312,21 +316,20 @@
 ; delete them.
 ;
 (define (marker-cleaner name helper)
-	(define marker (cog-node 'PredicateNode name))
+	(define marker (cog-node 'DefinedLinguisticPredicateNode name))
 	(define (call-helper)
 		; get the list of all unprocessed marker of type "name"
 		(define marker-list (cog-get-link 'EvaluationLink 'ListLink marker))
 		; call helper function to process them
 		(define results-list (append-map helper marker-list))
 		; delete the markers links and the marker itself
-		(for-each purge-hypergraph marker-list)
-		(cog-delete marker)
+		(for-each extract-hypergraph marker-list)
+		(cog-extract marker)
 		; return the results
 		results-list
 	)
 
-	(if (null? marker)
-		'()
+	(if (cog-atom? marker)
 		(call-helper)
 	)
 )
@@ -338,111 +341,205 @@
 ; =======================================================================
 
 ; -----------------------------------------------------------------------
-; rebuild -- Main recursive function to build the new abstracted links
-;
-; A helper function for building a new version of 'ilink' with abstraction.
-;
-; 'old-new-pairs' contains pairs (old, new) of nodes where 'old' needs
-; to be abstracted and 'new' is the non-instanced version. All 'old' in
-; 'ilink' will be replaced by 'new'.
-;
-; 'other-name-triplets' contains triplets (orig, new, word) of nodes where
-; 'orig' is an instanced word node, 'new' is the new instanced name, and
-; 'word' is the non-instanced version.  For each 'orig', a new instanced
-; node 'new' replaces it, and 'new' will inherit from 'word'. 
-;
-(define (rebuild ilink old-new-pairs other-name-triplets)
+(define (rebuild ilink lone-nodes non-lone-alist update)
+"
+  rebuild -- Main recursive function to build the new abstracted links
+
+  A helper function for building a new version of 'ilink' with abstraction.
+
+  ilink:
+  - a link to be abstracted should it have the 'lone-nodes'
+
+  lone-nodes:
+  - contains nodes that should be abstracted, while 'non-lone-alist'
+    is an a-list whose keys are nodes that should be cloned with new instance
+    name, and whose data values are the new instance name.
+
+  update:
+  - #t or #f to signal the update of etv in the abstracted r2l outputs returned
+"
+;XXX FIXME using the hacky word-get-r2l-node, bad idea!
 	; get all the nodes linked by this link
 	(define old-oset (cog-outgoing-set ilink))
-	(define (replace-old candidate)
-		(define new (assoc candidate old-new-pairs))
-		(define triplet (assoc candidate other-name-triplets))
-		; if this candidate is either a link or does not need to be replaced
-		(if (not new)
-			(cond ((cog-link? candidate) (rebuild candidate old-new-pairs other-name-triplets))
-				((not triplet) candidate)
-				(else
-					(if (equal? 'PredicateNode (cog-type candidate))
-						(ImplicationLink (cog-new-node (cog-type candidate) (cadr triplet)) (caddr triplet))
-						(InheritanceLink (cog-new-node (cog-type candidate) (cadr triplet)) (caddr triplet))
+	(define (replace-old old-atom)
+		(define a-pair (assoc old-atom non-lone-alist))
+		(cond ((cog-link? old-atom)
+					(rebuild old-atom lone-nodes non-lone-alist update))
+		      ; if node needed to be abstracted
+		      ((member? old-atom lone-nodes)
+					(if (equal? 'VariableNode (cog-type old-atom))
+						; XXX what would an abstracted VariableNode be like?
+						old-atom
+						; fail-safe for when R2L rule is incomplete and
+						; never created the abstract node
+						(if (null? (word-get-r2l-node
+								(word-inst-get-lemma (r2l-get-word-inst old-atom))))
+							(cog-new-node
+								(cog-type old-atom)
+								(cog-name (word-inst-get-lemma
+									(r2l-get-word-inst old-atom))))
+							(word-get-r2l-node (word-inst-get-lemma
+								(r2l-get-word-inst old-atom)))
+						)
 					)
-					(cog-node (cog-type candidate) (cadr triplet))
-				)
-			)
-			(cdr new)
+		      )
+			;  ; FIXME: Why create a node with new-instance name? Is this for
+			; anaphora-resolution?
+		    ;  ; If node needed to be cloned with new instance name
+		    ;  (a-pair
+			;(let ((abstract-node
+			;	; fail-safe for when R2L rule is incomplete and never created the abstract node
+			;	(if (null? (word-get-r2l-node (word-inst-get-lemma (r2l-get-word-inst old-atom))))
+			;		(cog-new-node (cog-type old-atom) (cog-name (word-inst-get-lemma (r2l-get-word-inst old-atom))))
+			;		(word-get-r2l-node (word-inst-get-lemma (r2l-get-word-inst old-atom)))
+			;	)
+			;     ))
+			;	(if (equal? 'PredicateNode (cog-type old-atom))
+			;		(ImplicationLink
+			;			(cog-new-node (cog-type old-atom) (cdr a-pair) (cog-tv old-atom))
+			;			abstract-node
+			;		)
+			;		(InheritanceLink
+			;			(cog-new-node (cog-type old-atom) (cdr a-pair) (cog-tv old-atom))
+			;			abstract-node
+			;		)
+			;	)
+			;	(cog-node (cog-type old-atom) (cdr a-pair))
+			;)
+		    ;  )
+		      (else old-atom)
 		)
 	)
+	; Create new outgoing-set
 	(define new-oset (map replace-old old-oset))
 
-	; create a new link with the new node list
-	(apply cog-new-link (cog-type ilink) new-oset)
+	; Create a new link with the new outgoing-set
+	(define new-link
+		(apply cog-new-link (append (list (cog-type ilink)) new-oset)))
+
+	(if update
+		(create-or-update-etv new-link)
+		new-link
+	)
 )
 
 ; -----------------------------------------------------------------------
-; create-abstract-version -- Create the abstracted representation
-;
-; Given a 'parse-node' of a parse, find out which words can be abstracted
-; and call the helper function to create them. Both the partial and
-; fully abstracted version are created.
-;
-(define (create-abstract-version parse-node)
-	(define word-inst-list (parse-get-words parse-node))
-	(define word-list (map word-inst-get-lemma word-inst-list))
+; Represents the set of InterpretationNodes with their abstracted r2l-outputs
+; counted.
+(define abstracted-interp-node (Concept "r2l-abstracted-interp"))
 
-	; find the ConceptNode/PredicateNode of each word instance and word node
-	(define word-inst-concept-list (remove null? (map word-get-r2l-node word-inst-list)))
-	(define word-concept-list (remove null? (map word-get-r2l-node word-list)))
-	(define word-assoc-list (zip word-inst-concept-list word-concept-list))
+; -----------------------------------------------------------------------
+(define (create-abstract-version interpretation-node update)
+"
+  Given an 'interpretation-node', it finds out which r2l links can be
+  abstracted and returns the newly abstracted atoms. For example, the
+  following link which is part of the an r2l output for the sentence,
+  \"Men breathe air\"
 
-	; for each word instant, find a list of all root links that includes it, and remove unneeded links
-	(define word-involvement-messy-list (map cog-get-root word-inst-concept-list))
-	(define word-involvement-intersection (lset-pairwise-intersection word-involvement-messy-list))
-	(define word-involvement-cleaned-list  ; removing links with only one word involved
-		(map (lambda (l) (filter-map (lambda (link) (member? link word-involvement-intersection)) l))
-			word-involvement-messy-list
-		)
-	)
-	(define word-involvement-cnt (map length word-involvement-cleaned-list))
-
-	; get word instances that only appear in one link and their associated word
-	; except words that are definite, which should not be cleaned
-	(define lone-word-assoc-list
-		(filter-map (lambda (inst word cnt) (if (and (= cnt 1) (not (definite? inst))) (cons inst word) #f))
-			word-inst-concept-list
-			word-concept-list
-			word-involvement-cnt
+	(EvaluationLink
+		(PredicateNode \"breathe@959e0d2f-dcb2-4105-b897-faefbe4d5149\")
+		(ListLink
+			(ConceptNode \"men@728c977c-2b4e-4b53-aeca-4a9d4d751357\")
+			(ConceptNode \"air@2d2b04b1-4502-4ffa-ac36-1c83006c6f4f\")
 		)
 	)
 
-	; get word instances that are not lone word, and create a new unique name for them;
-	; note that the new name might not be needed, since two non-lone words can be linking to each
-	; other with no lone-word involved (so we won't be creating InheritanceLink new-inst word here)
-	(define non-lone-word-assoc-list
-		(filter-map (lambda (inst word cnt) (if (or (> cnt 1) (definite? inst)) (list inst (create-unique-word-name word) word) #f))
-			word-inst-concept-list
-			word-concept-list
-			word-involvement-cnt
+	is converted to
+
+	(EvaluationLink
+		(PredicateNode \"breathe\")
+		(ListLink
+			(ConceptNode \"man\")
+			(ConceptNode \"air\")
 		)
 	)
 
-	(define all-links
-		(delete-duplicates (apply append word-involvement-cleaned-list))
-	)
+  interpretation-node:
+  - An InterpretationNode
 
-	; do the main creation for the partially abstract version
-	(define partial
-		(map (lambda (a-link) (rebuild a-link lone-word-assoc-list non-lone-word-assoc-list))
-			all-links
+  update:
+  - #t or #f to signal the update of etv in the abstracted r2l outputs returned
+"
+	(define r2l-set (cog-outgoing-set
+		(car (cog-chase-link 'ReferenceLink 'SetLink interpretation-node))))
+
+	; remove all unary links
+	(define r2l-cleaned-set (remove r2l-is-unary? r2l-set))
+
+	; for each link, retrieve its nodes
+	(define r2l-set-nodes (append-map
+		(lambda (lnk) (delete-duplicates (cog-get-all-nodes lnk)))
+		r2l-cleaned-set))
+
+	; partition the set of nodes: one set all lone nodes and the other the rest
+	(receive (lone-nodes other-nodes)
+		(partition
+			(lambda (n)
+				(and
+					(is-r2l-inst? n)
+					;FIXME: Why occurence of a node in more than one relation
+					; matter? One reason is if the instance-node is renamed
+					; then one wouldn't want to rename the same instance to
+					; different nodes, but then again why create new
+					; instance-nodes.
+					;(= (count (lambda (x) (equal? x n)) r2l-set-nodes) 1)
+					; Because a definite article may imply that the noun is,
+					; known in current context, and as such might not
+					; necessarily be a generializable(aka fully-abstracted)
+					; concept.
+					(not (definite? n))
+				)
+			)
+			r2l-set-nodes
 		)
-	)
 
-	; do the main creation for the fully abstract version
-	(define full
-		(map (lambda (a-link) (rebuild a-link word-assoc-list '()))
-			all-links
-		)
-	)
+		;(let ((non-lone-alist
+		;		(filter-map
+		;			(lambda (n)
+		;				(if (is-r2l-inst? n)
+		;					(cons n (create-unique-word-name n))
+		;					#f
+		;				)
+		;			)
+		;			(delete-duplicates other-nodes))))
+		;	(append
+		;		(map (lambda (lnk) (rebuild lnk lone-nodes non-lone-alist)) r2l-cleaned-set)
+		;		(map (lambda (lnk) (rebuild lnk (filter is-r2l-inst? (delete-duplicates r2l-set-nodes)) '())) r2l-cleaned-set)
+		;	)
+		;)
 
-	(append partial full)	
+		(if update (Member interpretation-node  abstracted-interp-node))
+
+		(map (lambda (lnk) (rebuild lnk lone-nodes '() update)) r2l-cleaned-set)
+	)
 )
 
+
+
+(define (has-been-counted? interp)
+"
+  Check if the abstracted-version of the given InterpretationNode's r2l output
+  has been counted or not.
+"
+	(define interp-list
+		(cog-chase-link 'MemberLink 'InterpretationNode abstracted-interp-node))
+
+	(if (member? interp interp-list)
+		#t
+		#f
+	)
+)
+
+
+(define-public (get-abstract-version interp)
+"
+  Returns a list with the abstracted-version of the r2l outputs. The returned
+  atoms are counted only once.
+
+  The abstracted r2l outputs are primarily used for reasoning.
+
+  interp:
+  - An InterpretationNode
+"
+	(create-abstract-version interp (not (has-been-counted? interp)))
+)

@@ -1,27 +1,36 @@
+(use-modules (srfi srfi-1)) ; For 'every'
 
 ; =======================================================================
 ; Helper functions
 ; =======================================================================
 
 ; -----------------------------------------------------------------------
-; r2l-get-word-inst -- Retrieve WordInstanceNode given R2L style node
+; set-values! -- Helpful macro for storing multiple return values
 ;
-; Given a R2L style node, find the corresponding WordInstanceNode.
+; The macro allows binding of multiple return values to several variables,
+; without having to define a subscope like (receive).
 ;
-(define (r2l-get-word-inst node)
-	(cond ((null? node) '())
-	      ((has-word-inst? node) (cog-node 'WordInstanceNode (cog-name node)))
-	      (else '())
+; Can be used like:
+;
+;	(define a)
+;	(define b)
+;	(set-values! (a b) (values 5 7))
+;
+; resulting a = 5, b = 7
+;
+(define-syntax set-values!
+	(syntax-rules ()
+		((_ () exp)
+			(values)
+		)
+		((_ (v1 . rest) exp)
+			(begin
+				(set! v1 (call-with-values (lambda () exp) list))
+				(set-values! rest (apply values (cdr v1)))
+				(set! v1 (car v1))
+			)
+		)
 	)
-)
-
-; -----------------------------------------------------------------------
-; has-word-inst? -- Check if a node has the corresponding WordInstanceNode
-;
-; Return #t or #f depends on whether the node as a WordInstanceNode.
-;
-(define (has-word-inst? node)
-	(not (null? (cog-node 'WordInstanceNode (cog-name node))))
 )
 
 ; -----------------------------------------------------------------------
@@ -61,15 +70,29 @@
 )
 
 ; -----------------------------------------------------------------------
-; and-l -- Apply 'and' operator to a list
+; cog-has-atom-type? -- Check if "atom" contains atom type "type"
 ;
-; Helper function for since we cannot do (apply and ...)
+; Return #t or #f depends on whether the hypergraph "atom" contains an
+; atom of type "type".  Basically doing BFS.
 ;
-(define (and-l x)
-	(if (null? x)
-		#t
-		(if (car x) (and-l (cdr x)) #f)
+(define (cog-has-atom-type? atom type)
+	(define (recursive-helper queue)
+		(cond ((null? queue)
+			#f
+		      )
+		      ((equal? (cog-type (car queue)) type)
+			#t
+		      )
+		      (else
+			(if (cog-link? (car queue))
+				(set! queue (append queue (cog-outgoing-set (car queue))))
+			)
+			(recursive-helper (cdr queue))
+		      )
+		)
 	)
+
+	(recursive-helper (append (list atom) (cog-outgoing-set atom)))
 )
 
 ; -----------------------------------------------------------------------
@@ -92,19 +115,32 @@
 ; are the same, and if specified, also check if POS matches.
 ;
 (define (form-graph-match? atom form)
-	(if (cog-node? atom)
-		(if (equal? (cog-type atom) (cog-type form))
-			; check if we need to check POS or not
-			(if (string=? (cog-name form) "_")
-				#t
-				(word-inst-match-pos? (r2l-get-word-inst atom) (cog-name form))
+	; if the form is the wildcard node, don't care what it matches to
+	(if (equal? form (VariableNode "MicroplanningWildcardMarker"))
+		#t
+		(if (cog-node? atom)
+			(if (equal? (cog-type atom) (cog-type form))
+				; check if we need to check POS or not
+				(if (string=? (cog-name form) "MicroplanningAnyNameMarker")
+					#t
+					(let ((pos (cond ((equal? (cog-name form) "MicroplanningVerbMarker")
+							  "verb"
+							 )
+							 (else
+							  "unknown"
+							 )
+						   )
+					     ))
+					     (word-inst-match-pos? (r2l-get-word-inst atom) pos)
+					)
+				)
+				#f
 			)
-			#f
-		)
-		(if (and (= (cog-arity atom) (cog-arity form)) (equal? (cog-type atom) (cog-type form)))
-			; check the outgoing set recursively
-			(and-l (map form-graph-match? (cog-outgoing-set atom) (cog-outgoing-set form)))
-			#f
+			(if (and (= (cog-arity atom) (cog-arity form)) (equal? (cog-type atom) (cog-type form)))
+				; check the outgoing set recursively
+				(every form-graph-match? (cog-outgoing-set atom) (cog-outgoing-set form))
+				#f
+			)
 		)
 	)
 )
@@ -112,49 +148,98 @@
 ; -----------------------------------------------------------------------
 ; match-sentence-forms -- Helper function to see if an atom matches a sentence form
 ;
-; Check "atom" against a list of sentence forms and returns the first form
-; matched;  returns #f if none matched.
+; Check "atom" and its subgraph against a list of sentence forms and returns
+; the subgraph that got matched;  returns #f if none matched a sentence form.
+;
+; Also returns the base atom index (in the order returned from cog-get-all-nodes)
+; where the first node in the matched subgraph would start.  The atom index
+; is useful for
+;
+;    (EvaluationLink (PredicateNode "punched") (ListLink (ConceptNode "I") (ConceptNode "I"))
+;
+; where the same (ConceptNode "I") might be changed differently bases on position.
 ;
 (define (match-sentence-forms atom favored-forms)
-	(find (lambda (form) (form-graph-match? atom form)) favored-forms)
+	(define atom-base-index 0)
+	(define (helper-start atom form)
+		(set! atom-base-index 0)
+		(helper atom form)
+	)
+
+	; helper function to allow subgraph matching
+	(define (helper atom form)
+		(if (form-graph-match? atom form)
+			atom
+			; check if subgraph match the form
+			(if (cog-link? atom)
+				(any (lambda (subgraph) (helper subgraph form)) (cog-outgoing-set atom))
+				(begin
+					(set! atom-base-index (+ atom-base-index 1))
+					#f
+				)
+			)
+		)
+	)
+
+	(values (any (lambda (form) (helper-start atom form)) favored-forms) atom-base-index)
 )
 
 ; -----------------------------------------------------------------------
-; is-object? -- Check if 'node' is "(indirect) object" within 'link'
+; cog-pred-is-argN? -- Check if 'node' is argument N within 'link'
 ;
-; Given a link 'link', check if the node 'node' can be considered "object"
-; or "indirect object" as in "subject-verb-object".
+; Given an EvaluationLink 'link', check if the node 'node' is argument N
+; (starts from 0).
 ;
-(define (is-object? link node)
-	; subject-object property must be in EvaluationLink
-	(if (not (equal? 'EvaluationLink (cog-type link)))
+(define (cog-pred-is-argN? link node N)
+	; must be in EvaluationLink, and N >= 0
+	(if (or (< N 0) (not (equal? 'EvaluationLink (cog-type link))))
 		#f
-		; (indirect) object must be in a ListLink with the subject
-		(if (and (equal? 'ListLink (cog-type (gdr link))) (> (cog-arity (gdr link)) 1))
-			; check either "object" or "indirect object"
-			(if (= (cog-arity (gdr link)) 2)
-				(equal? node (gddr link))
-				(equal? node (caddr (cog-outgoing-set (gdr link))))
+		(if (equal? 'ListLink (cog-type (gdr link)))
+			(if (> (cog-arity (gdr link)) N)
+				(equal? node (list-ref (cog-outgoing-set (gdr link)) N))
+				#f
 			)
-			#f
+			(if (= N 0)
+				(equal? node (gdr link))
+				#f
+			)
 		)
 	)
 )
 
 ; -----------------------------------------------------------------------
-; get-subject -- Get the subject of a link
+; cog-pred-get-argN -- Get argument number N of an EvaluationLink
 ;
-; Given a link 'link', get the node that can be considered "subject" as
-; in "subject-verb-object".
+; Given a EvaluationLink 'link', get argument N.  The returned node can
+; be considered "subject" as in "subject-verb-object".
 ;
-(define (get-subject link)
-	; similar to is-object? check, must be in EvaluationLink
-	(if (not (equal? 'EvaluationLink (cog-type link)))
+(define (cog-pred-get-argN link N)
+	; must be in EvaluationLink, and N >= 0
+	(if (or (< N 0) (not (equal? 'EvaluationLink (cog-type link))))
 		#f
 		(if (equal? 'ListLink (cog-type (gdr link)))
-			(gadr link)
-			(gdr link)
+			(if (> (cog-arity (gdr link)) N)
+				(list-ref (cog-outgoing-set (gdr link)) N)
+				#f
+			)
+			(if (= N 0)
+				(gdr link)
+				#f
+			)
 		)
+	)
+)
+
+; -----------------------------------------------------------------------
+; cog-pred-get-pred -- Get the predicate of an EvaluationLink
+;
+; Get the PredicateNode of a specific EvaluationLink 'link'.
+;
+(define (cog-pred-get-pred link)
+	; must be in EvaluationLink
+	(if (not (equal? 'EvaluationLink (cog-type link)))
+		#f
+		(gar link)
 	)
 )
 
@@ -195,7 +280,7 @@
 				(cons curr-dist (right2left-helper (cdr sub-list) (+ 1 curr-dist)))
 			)
 		      )
-		)				
+		)
 	)
 
 	(set! result-list (left2right-helper result-list len))
@@ -204,4 +289,3 @@
 	(set! result-list (reverse result-list))
 	result-list
 )
-

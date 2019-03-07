@@ -1,33 +1,56 @@
-; wrapping into a function so it can be dynamically recreated
+; -----------------------------------------------------------------------
+; microplanning-init -- Initialization code for microplanning
+;
+; Wrapping some of the persisitance atoms required for microplanning in a
+; function so that they can be dynamically created without being affected
+; by (clear).
+;
+; (VariableNode "MicroplanningWildcardMarker") is a unique node that
+; microplanning recognizes as "match to any type of atom", whereas all the
+; other links and nodes must match to the exact same type of links or
+; nodes, with some additional restrictions on the name.
+;
+; "MicroplanningAnyNameMarker" means don't care about the name of the node
+; (but, as mentioned, the node type still needs to match).
+;
+; "MicroplanningVerbMarker" means the name of the node must have a
+; corresponding WordInstanceNode whose POS is a verb.
+;
 (define (microplanning-init)
 	(InheritanceLink
-		(ConceptNode "declarative")
+		(ConceptNode "DeclarativeUtterance")
 		(OrLink
-			; SVO
 			(EvaluationLink
-				(PredicateNode "verb")
-				(ListLink
-					(ConceptNode "_")
-					(ConceptNode "_")
-				)
+				(PredicateNode "MicroplanningVerbMarker")
+				(VariableNode "MicroplanningWildcardMarker")
 			)
-			; SV
+		)
+	)
+	
+	(InheritanceLink
+		(ConceptNode "InterrogativeUtterance")
+		(OrLink
 			(EvaluationLink
-				(PredicateNode "verb")
-				(ListLink
-					(ConceptNode "_")
-				)
+				(PredicateNode "MicroplanningVerbMarker")
+				(VariableNode "MicroplanningWildcardMarker")
 			)
-			; SVIO
 			(EvaluationLink
-				(PredicateNode "verb")
+				(VariableNode "MicroplanningAnyNameMarker")
 				(ListLink
-					(ConceptNode "_")
-					(ConceptNode "_")
-					(ConceptNode "_")
+					(ConceptNode "MicroplanningAnyNameMarker")
 				)
 			)
 		)
 	)
+	
+	(InheritanceLink
+		(ConceptNode "ImperativeUtterance")
+		(OrLink
+			(EvaluationLink
+				(PredicateNode "MicroplanningVerbMarker")
+				(VariableNode "MicroplanningWildcardMarker")
+			)
+		)
+	)
 )
-		
+
